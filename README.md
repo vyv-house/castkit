@@ -112,6 +112,17 @@ RUST_LOG=producer=info cargo run --release -p producer -- \
   --fps 30
 ```
 
+### Room lifecycle metadata
+
+`GET /api/rooms` keeps recently disconnected rooms visible briefly so operators can see streams drop instead of losing tiles immediately. The viewer also releases non-pinned inactive streams after its grace window so backend retention can expire. Each room also includes:
+
+| Field | Meaning |
+|-------|---------|
+| `active` | Producer WebSocket is currently connected and the room is watchable |
+| `producer_connected` | Producer WebSocket is currently connected |
+| `frame_fresh` | Latest frame is recent, or the producer is still waiting for its first frame |
+| `last_frame_age_ms` | Wall-clock age of the latest received frame, or `null` before the first frame |
+
 ### Gateway room metrics
 
 `GET /api/rooms` includes cumulative per-room `metrics`:
