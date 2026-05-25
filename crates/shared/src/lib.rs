@@ -41,6 +41,9 @@ pub struct RoomInfo {
     pub height: u16,
     pub watchers: usize,
     pub active: bool,
+    pub producer_connected: bool,
+    pub frame_fresh: bool,
+    pub last_frame_age_ms: Option<u64>,
     pub metrics: RoomMetrics,
 }
 
@@ -148,6 +151,9 @@ mod tests {
             height: 1080,
             watchers: 1,
             active: true,
+            producer_connected: true,
+            frame_fresh: true,
+            last_frame_age_ms: Some(25),
             metrics: RoomMetrics {
                 packets_received: 10,
                 keyframes_received: 2,

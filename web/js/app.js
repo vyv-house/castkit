@@ -10,6 +10,10 @@ export class StreamManager {
         this.streams = new Map();
         this.elements = new Map();
         this.pinnedRooms = new Set();
+        this.missingRooms = new Map();
+        this.inactiveRooms = new Map();
+        this.missingRoomGraceMs = options.missingRoomGraceMs ?? 9000;
+        this.inactiveRoomGraceMs = options.inactiveRoomGraceMs ?? 9000;
         this.autoAddInterval = null;
     }
 
@@ -18,6 +22,8 @@ export class StreamManager {
             this.pinnedRooms.add(roomId);
         }
         if (this.streams.has(roomId)) {
+            this.missingRooms.delete(roomId);
+            this.inactiveRooms.delete(roomId);
             return this.streams.get(roomId);
         }
         if (this.streams.size >= this.maxStreams) {
@@ -27,6 +33,8 @@ export class StreamManager {
 
         const { canvas, element } = this.grid.addMonitor(roomId);
         this.elements.set(roomId, element);
+        this.missingRooms.delete(roomId);
+        this.inactiveRooms.delete(roomId);
         this.grid.setStatus(roomId, 'disconnected');
 
         if (!canvas.transferControlToOffscreen || typeof Worker === 'undefined') {
@@ -110,6 +118,8 @@ export class StreamManager {
         this.elements.delete(roomId);
         this.streams.delete(roomId);
         this.pinnedRooms.delete(roomId);
+        this.missingRooms.delete(roomId);
+        this.inactiveRooms.delete(roomId);
     }
 
     removeAll() {
@@ -132,10 +142,31 @@ export class StreamManager {
             syncInFlight = true;
             try {
                 const rooms = await fetchRooms(this.baseUrl);
-                const roomIds = new Set(rooms.map((room) => room.id).filter(Boolean));
+                const now = Date.now();
+                const roomsById = new Map(rooms.map((room) => [room.id, room]).filter(([id]) => Boolean(id)));
 
-                for (const roomId of roomIds) {
-                    if (!this.streams.has(roomId)) {
+                for (const [roomId, room] of roomsById) {
+                    this.missingRooms.delete(roomId);
+
+                    if (this.streams.has(roomId)) {
+                        if (room.producer_connected) {
+                            this.inactiveRooms.delete(roomId);
+                            this.grid.setStatus(roomId, 'connected');
+                            continue;
+                        }
+
+                        this.grid.setStatus(roomId, 'disconnected');
+                        if (!this.pinnedRooms.has(roomId)) {
+                            const inactiveSince = this.inactiveRooms.get(roomId) || now;
+                            this.inactiveRooms.set(roomId, inactiveSince);
+                            if (now - inactiveSince >= this.inactiveRoomGraceMs) {
+                                this.removeStream(roomId);
+                            }
+                        }
+                        continue;
+                    }
+
+                    if (room.producer_connected) {
                         try {
                             this.addStream(roomId);
                         } catch (error) {
@@ -145,7 +176,21 @@ export class StreamManager {
                 }
 
                 for (const roomId of Array.from(this.streams.keys())) {
-                    if (!roomIds.has(roomId) && !this.pinnedRooms.has(roomId)) {
+                    if (roomsById.has(roomId)) {
+                        continue;
+                    }
+
+                    if (this.pinnedRooms.has(roomId)) {
+                        this.grid.setStatus(roomId, 'disconnected');
+                        continue;
+                    }
+
+                    const missingSince = this.missingRooms.get(roomId) || now;
+                    this.missingRooms.set(roomId, missingSince);
+                    this.inactiveRooms.delete(roomId);
+                    this.grid.setStatus(roomId, 'disconnected');
+
+                    if (now - missingSince >= this.missingRoomGraceMs) {
                         this.removeStream(roomId);
                     }
                 }
@@ -171,8 +216,8 @@ export class StreamManager {
 }
 
 export async function fetchRooms(baseUrl) {
-    void baseUrl;
-    const res = await fetch(`/api/rooms`);
+    const origin = baseUrl ? `${window.location.protocol}//${baseUrl}` : '';
+    const res = await fetch(`${origin}/api/rooms`);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     return res.json();
 }

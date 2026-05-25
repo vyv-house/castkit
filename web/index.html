@@ -108,6 +108,7 @@
     font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.4px;
     padding: 4px 8px; border-radius: 999px; background: rgba(46,204,113,0.15); color: var(--success); border: 1px solid rgba(46,204,113,0.25);
   }
+  .badge.inactive { background: rgba(231,76,60,0.14); color: var(--danger); border-color: rgba(231,76,60,0.25); }
   .room-meta { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
   .room-metrics {
     margin-top: 14px;
@@ -217,17 +218,27 @@ function renderCard(room) {
   const lagEvents = Number(metrics.watcher_lag_events) || 0;
   const laggedFrames = Number(metrics.watcher_lagged_frames) || 0;
   const uptimeMs = Number(metrics.uptime_ms) || 0;
+  const lastFrameAgeMs = room.last_frame_age_ms === null || room.last_frame_age_ms === undefined
+    ? null
+    : Number(room.last_frame_age_ms);
   const packetsPerSecond = uptimeMs > 0 ? (packets / (uptimeMs / 1000)).toFixed(1) : '0.0';
   const active = room.active ? 'green' : 'red';
   const label = room.active ? 'Active' : 'Inactive';
+  const badgeClass = room.active ? 'badge' : 'badge inactive';
+  const producerState = room.producer_connected ? 'producer online' : 'producer offline';
+  const frameState = room.frame_fresh === false ? 'frames stale' : 'frames fresh';
+  const lastSeen = Number.isFinite(lastFrameAgeMs) ? `${formatDuration(lastFrameAgeMs)} ago` : 'waiting for first frame';
   card.innerHTML = `
     <div class="room-header">
       <div class="room-id">${escapeHtml(room.id)}</div>
-      <div class="badge">${label}</div>
+      <div class="${badgeClass}">${label}</div>
     </div>
     <div class="room-meta">
       <div class="meta-item"><span class="meta-dot ${active}"></span>${width}×${height}</div>
       <div class="meta-item"><span class="meta-dot ${active}"></span>${watchers} watcher${watchers === 1 ? '' : 's'}</div>
+      <div class="meta-item"><span class="meta-dot ${active}"></span>${producerState}</div>
+      <div class="meta-item"><span class="meta-dot ${active}"></span>${frameState}</div>
+      <div class="meta-item"><span class="meta-dot ${active}"></span>${lastSeen}</div>
     </div>
     <div class="room-metrics" aria-label="Room telemetry">
       <div class="metric-pill">${packetsPerSecond} pkt/s avg</div>
@@ -249,6 +260,14 @@ function escapeHtml(str) {
     '"': '&quot;',
     "'": '&#39;',
   }[c]));
+}
+
+function formatDuration(ms) {
+  if (ms < 1000) return `${Math.round(ms)} ms`;
+  const seconds = ms / 1000;
+  if (seconds < 60) return `${seconds.toFixed(seconds < 10 ? 1 : 0)} s`;
+  const minutes = seconds / 60;
+  return `${minutes.toFixed(minutes < 10 ? 1 : 0)} min`;
 }
 
 function formatBytes(bytes) {
@@ -277,7 +296,8 @@ async function load() {
       return;
     }
     empty.style.display = 'none';
-    countEl.textContent = `${rooms.length} room${rooms.length === 1 ? '' : 's'}`;
+    const activeCount = rooms.filter((room) => room.active).length;
+    countEl.textContent = `${rooms.length} room${rooms.length === 1 ? '' : 's'} · ${activeCount} active`;
     for (const room of rooms) {
       grid.appendChild(renderCard(room));
     }

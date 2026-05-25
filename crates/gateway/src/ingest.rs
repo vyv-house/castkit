@@ -1,6 +1,6 @@
 use std::collections::HashMap;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
@@ -12,6 +12,8 @@ use tracing::{debug, info, warn};
 
 use crate::room::{ProducerCommand, Room};
 use crate::AppState;
+
+const ROOM_RETENTION_AFTER_DISCONNECT: Duration = Duration::from_secs(10);
 
 pub async fn handle_ingest(
     ws: WebSocketUpgrade,
@@ -28,29 +30,48 @@ pub async fn handle_ingest(
 }
 
 async fn handle_socket(socket: WebSocket, room_id: String, state: Arc<AppState>) {
-    let (room, cmd_rx) = state.rooms.create_room(room_id.clone());
+    let (room, cmd_rx, producer_generation) = state.rooms.connect_producer(room_id.clone());
     info!(room_id = %room_id, "producer connected");
 
     let (outbound_tx, outbound_rx) = mpsc::channel(16);
     let command_task = tokio::spawn(forward_commands(cmd_rx, outbound_tx));
-    let socket_task = tokio::spawn(run_producer_socket(socket, room.clone(), outbound_rx));
+    let socket_task = tokio::spawn(run_producer_socket(
+        socket,
+        room.clone(),
+        outbound_rx,
+        producer_generation,
+    ));
 
     let _ = socket_task.await;
     command_task.abort();
-    state.rooms.remove_room(&room_id);
-    info!(room_id = %room_id, "producer disconnected");
+    let current_disconnect = room.mark_producer_disconnected(producer_generation);
+    info!(room_id = %room_id, current_disconnect, "producer disconnected");
+
+    let state_for_cleanup = state.clone();
+    let room_for_cleanup = room.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(ROOM_RETENTION_AFTER_DISCONNECT).await;
+        if state_for_cleanup.rooms.remove_room_if_current(
+            &room_id,
+            &room_for_cleanup,
+            producer_generation,
+        ) {
+            info!(room_id = %room_id, "removed inactive room");
+        }
+    });
 }
 
 async fn run_producer_socket(
     mut socket: WebSocket,
     room: Arc<Room>,
     mut outbound_rx: mpsc::Receiver<Message>,
+    producer_generation: usize,
 ) {
     loop {
         tokio::select! {
             inbound = socket.recv() => {
                 match inbound {
-                    Some(Ok(Message::Binary(frame))) => handle_frame(&room, frame),
+                    Some(Ok(Message::Binary(frame))) => handle_frame(&room, frame, producer_generation),
                     Some(Ok(Message::Close(_))) | None => break,
                     Some(Ok(_)) => {}
                     Some(Err(err)) => {
@@ -74,25 +95,14 @@ async fn run_producer_socket(
     }
 }
 
-fn handle_frame(room: &Room, frame: Bytes) {
+fn handle_frame(room: &Room, frame: Bytes, producer_generation: usize) {
     let Some((header, payload)) = shared::decode_frame(&frame) else {
         warn!(room_id = %room.id, "dropping malformed producer frame");
         return;
     };
 
-    room.record_frame(&header, payload.len());
-
-    if header.width > 0 && header.height > 0 {
-        room.width.store(header.width as usize, Ordering::Relaxed);
-        room.height.store(header.height as usize, Ordering::Relaxed);
-    }
-
-    if header.frame_type == shared::FRAME_KEYFRAME {
-        room.update_keyframe(frame.clone());
-    }
-
-    if let Err(err) = room.tx.send(frame) {
-        debug!(room_id = %room.id, error = %err, "frame had no active receivers");
+    if !room.publish_frame(producer_generation, &header, payload.len(), frame) {
+        debug!(room_id = %room.id, "dropping frame from stale producer connection");
     }
 }
 
