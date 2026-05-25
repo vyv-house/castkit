@@ -104,6 +104,8 @@ Multi-view: `http://localhost:8080/viewer.html?rooms=room1,room2,room3`
 
 The system exposes lightweight counters that are useful for LAN latency and throughput tuning without adding remote-control, recording, audio, account, or relay features.
 
+See [`docs/transport-codec-decision.md`](docs/transport-codec-decision.md) for the current transport/codec decision, protocol-overhead comparison, and redesign thresholds.
+
 ### Producer telemetry
 
 The producer logs one `producer telemetry` event per second. Useful fields:
