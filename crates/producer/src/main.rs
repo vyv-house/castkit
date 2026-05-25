@@ -5,13 +5,27 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use tokio_tungstenite::tungstenite::{connect, stream::MaybeTlsStream, Message, WebSocket};
 
 #[no_mangle]
 #[allow(non_snake_case)]
 pub extern "C" fn BackingScaleFactor(_display: u32) -> f32 {
     1.0
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum QualityProfile {
+    LowLatency,
+    Balanced,
+    Quality,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum ResolutionPreset {
+    Source,
+    P720,
+    P1080,
 }
 
 #[derive(Parser)]
@@ -24,10 +38,116 @@ struct Args {
     secret: String,
     #[arg(long, default_value_t = 30)]
     fps: u32,
+    #[arg(long, value_enum, default_value = "balanced")]
+    profile: QualityProfile,
+    #[arg(long, value_enum, default_value = "source")]
+    resolution: ResolutionPreset,
     #[arg(long)]
     width: Option<u32>,
     #[arg(long)]
     height: Option<u32>,
+    #[arg(long)]
+    quality: Option<f32>,
+    #[arg(long)]
+    keyframe_interval: Option<u32>,
+    #[arg(long)]
+    capture_queue_depth: Option<usize>,
+    #[arg(long)]
+    stream_queue_length: Option<i8>,
+    #[arg(long, default_value_t = 250)]
+    write_timeout_ms: u64,
+    #[arg(long)]
+    stretch: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ProducerPolicy {
+    fps: u32,
+    quality: f32,
+    keyframe_interval: u32,
+    capture_queue_depth: usize,
+    stream_queue_length: i8,
+    write_timeout: Duration,
+    cpu_used: i32,
+    preserve_aspect_ratio: bool,
+}
+
+impl ProducerPolicy {
+    fn from_args(args: &Args) -> Result<Self, String> {
+        if args.fps == 0 {
+            return Err("fps must be greater than zero".to_owned());
+        }
+
+        let profile = ProfileDefaults::new(args.profile, args.fps);
+        let quality = args.quality.unwrap_or(profile.quality);
+        if !(0.1..=2.0).contains(&quality) {
+            return Err("quality must be between 0.1 and 2.0".to_owned());
+        }
+        if args.write_timeout_ms == 0 {
+            return Err("write-timeout-ms must be greater than zero".to_owned());
+        }
+
+        let keyframe_interval = args
+            .keyframe_interval
+            .unwrap_or(profile.keyframe_interval)
+            .max(1);
+        let capture_queue_depth = args
+            .capture_queue_depth
+            .unwrap_or(profile.capture_queue_depth)
+            .clamp(1, 8);
+        let stream_queue_length = args
+            .stream_queue_length
+            .unwrap_or(profile.stream_queue_length)
+            .clamp(1, 8);
+
+        Ok(Self {
+            fps: args.fps,
+            quality,
+            keyframe_interval,
+            capture_queue_depth,
+            stream_queue_length,
+            write_timeout: Duration::from_millis(args.write_timeout_ms),
+            cpu_used: profile.cpu_used,
+            preserve_aspect_ratio: !args.stretch,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ProfileDefaults {
+    quality: f32,
+    keyframe_interval: u32,
+    capture_queue_depth: usize,
+    stream_queue_length: i8,
+    cpu_used: i32,
+}
+
+impl ProfileDefaults {
+    fn new(profile: QualityProfile, fps: u32) -> Self {
+        match profile {
+            QualityProfile::LowLatency => Self {
+                quality: 0.75,
+                keyframe_interval: fps.max(1),
+                capture_queue_depth: 1,
+                stream_queue_length: 2,
+                cpu_used: 14,
+            },
+            QualityProfile::Balanced => Self {
+                quality: 1.0,
+                keyframe_interval: fps.max(1),
+                capture_queue_depth: 2,
+                stream_queue_length: 3,
+                cpu_used: 12,
+            },
+            QualityProfile::Quality => Self {
+                quality: 1.25,
+                keyframe_interval: fps.saturating_mul(2).max(1),
+                capture_queue_depth: 3,
+                stream_queue_length: 4,
+                cpu_used: 8,
+            },
+        }
+    }
 }
 
 struct FrameData {
@@ -66,26 +186,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
     tracing_subscriber::fmt::init();
 
-    if args.fps == 0 {
-        return Err("fps must be greater than zero".into());
-    }
+    let policy = ProducerPolicy::from_args(&args).map_err(invalid_input)?;
 
     let display = capture::Display::primary();
-    let cap_width = args
-        .width
-        .map(|w| w as usize)
-        .unwrap_or_else(|| display.width());
-    let cap_height = args
-        .height
-        .map(|h| h as usize)
-        .unwrap_or_else(|| display.height());
+    let (cap_width, cap_height) = target_resolution(&args, &display).map_err(invalid_input)?;
 
     let encoder = capture::Vp8Encoder::new(capture::Vp8EncoderConfig {
         width: cap_width as u32,
         height: cap_height as u32,
-        quality: 1.0,
-        keyframe_interval: Some(30),
+        quality: policy.quality,
+        keyframe_interval: Some(policy.keyframe_interval),
+        cpu_used: policy.cpu_used,
     })?;
+
+    tracing::info!(
+        profile = ?args.profile,
+        resolution = ?args.resolution,
+        width = cap_width,
+        height = cap_height,
+        fps = policy.fps,
+        quality = policy.quality,
+        keyframe_interval = policy.keyframe_interval,
+        capture_queue_depth = policy.capture_queue_depth,
+        stream_queue_length = policy.stream_queue_length,
+        write_timeout_ms = policy.write_timeout.as_millis(),
+        cpu_used = policy.cpu_used,
+        preserve_aspect_ratio = policy.preserve_aspect_ratio,
+        "producer policy"
+    );
 
     let ws_url = format!(
         "{}/ingest/{}?token={}",
@@ -95,15 +223,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     let (ws_stream, _) = tokio::task::spawn_blocking(move || connect(ws_url))
         .await?
-        .map_err(|error| format!("websocket connect failed: {error}"))?;
+        .map_err(|error| runtime_error(format!("websocket connect failed: {error}")))?;
 
-    let (frame_tx, frame_rx) = crossbeam_channel::bounded(2);
+    let (frame_tx, frame_rx) = crossbeam_channel::bounded(policy.capture_queue_depth);
     let dropped_capture_frames = Arc::new(AtomicU64::new(0));
     let config = capture::Config {
         cursor: true,
-        letterbox: false,
-        throttle: 1.0 / args.fps as f64,
-        queue_length: 3,
+        letterbox: policy.preserve_aspect_ratio,
+        throttle: 1.0 / policy.fps as f64,
+        queue_length: policy.stream_queue_length,
     };
 
     let capture_drops = dropped_capture_frames.clone();
@@ -130,7 +258,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         },
     )
-    .map_err(|error| format!("failed to start capture: {error:?}"))?;
+    .map_err(|error| runtime_error(format!("failed to start capture: {error:?}")))?;
 
     let force_kf_flag = Arc::new(AtomicBool::new(false));
     let capture_loop = tokio::task::spawn_blocking(move || {
@@ -142,6 +270,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             cap_width,
             cap_height,
             dropped_capture_frames,
+            policy,
         )
     });
 
@@ -150,12 +279,44 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             tracing::info!("shutting down");
         }
         result = capture_loop => {
-            result??;
+            result?.map_err(runtime_error)?;
         }
     }
 
     drop(capturer);
     Ok(())
+}
+
+fn target_resolution(args: &Args, display: &capture::Display) -> Result<(usize, usize), String> {
+    let (preset_width, preset_height) = match args.resolution {
+        ResolutionPreset::Source => (display.width(), display.height()),
+        ResolutionPreset::P720 => (1280, 720),
+        ResolutionPreset::P1080 => (1920, 1080),
+    };
+
+    let width = args
+        .width
+        .map(|width| width as usize)
+        .unwrap_or(preset_width);
+    let height = args
+        .height
+        .map(|height| height as usize)
+        .unwrap_or(preset_height);
+    let width = width.max(1);
+    let height = height.max(1);
+    if width > u16::MAX as usize || height > u16::MAX as usize {
+        return Err("width and height must fit the 16-bit wire protocol".to_owned());
+    }
+
+    Ok((width, height))
+}
+
+fn invalid_input(error: String) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::InvalidInput, error)
+}
+
+fn runtime_error(error: String) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::Other, error)
 }
 
 fn run_capture_loop(
@@ -166,19 +327,27 @@ fn run_capture_loop(
     cap_width: usize,
     cap_height: usize,
     dropped_capture_frames: Arc<AtomicU64>,
+    policy: ProducerPolicy,
 ) -> CaptureResult<()> {
-    configure_read_timeout(&ws_stream)?;
+    configure_socket_timeouts(&ws_stream, policy.write_timeout)?;
     let start = Instant::now();
     let mut yuv_buf = Vec::new();
     let mut frame_count: u64 = 0;
     let mut stats = ProducerStats::default();
     let mut last_stats_at = Instant::now();
     loop {
-        let frame_data = match frame_rx.recv_timeout(Duration::from_secs(5)) {
+        let mut frame_data = match frame_rx.recv_timeout(Duration::from_secs(5)) {
             Ok(frame) => frame,
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
             Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
         };
+
+        let mut stale_frames_dropped = 0;
+        while let Ok(next_frame) = frame_rx.try_recv() {
+            frame_data = next_frame;
+            stale_frames_dropped += 1;
+        }
+        stats.stale_frames_dropped += stale_frames_dropped;
 
         poll_force_keyframe(&mut ws_stream, &force_kf_flag)?;
 
@@ -189,7 +358,8 @@ fn run_capture_loop(
         stats.convert_ns += convert_started.elapsed().as_nanos() as u64;
 
         let pts = start.elapsed().as_millis() as i64;
-        let force_kf = frame_count % 30 == 0 || force_kf_flag.swap(false, Ordering::Relaxed);
+        let force_kf = frame_count % policy.keyframe_interval as u64 == 0
+            || force_kf_flag.swap(false, Ordering::Relaxed);
         let encode_started = Instant::now();
         let packets = if force_kf {
             encoder
@@ -247,6 +417,7 @@ struct ProducerStats {
     frames_captured: u64,
     packets_sent: u64,
     keyframes_sent: u64,
+    stale_frames_dropped: u64,
     bytes_sent: u64,
     convert_ns: u64,
     encode_ns: u64,
@@ -264,6 +435,7 @@ impl ProducerStats {
             pipeline_busy_pct,
             packets_sent = self.packets_sent,
             keyframes_sent = self.keyframes_sent,
+            stale_frames_dropped = self.stale_frames_dropped,
             dropped_capture_frames,
             kbps = (self.bytes_sent as f64 * 8.0 / 1000.0) / elapsed_secs,
             avg_convert_ms = self.convert_ns as f64 / frames as f64 / 1_000_000.0,
@@ -306,10 +478,14 @@ where
     }
 }
 
-fn configure_read_timeout(ws_stream: &WebSocket<MaybeTlsStream<TcpStream>>) -> CaptureResult<()> {
+fn configure_socket_timeouts(
+    ws_stream: &WebSocket<MaybeTlsStream<TcpStream>>,
+    write_timeout: Duration,
+) -> CaptureResult<()> {
     match ws_stream.get_ref() {
         MaybeTlsStream::Plain(stream) => stream
             .set_read_timeout(Some(Duration::from_millis(1)))
+            .and_then(|()| stream.set_write_timeout(Some(write_timeout)))
             .map_err(|error| error.to_string()),
         #[allow(unreachable_patterns)]
         _ => Ok(()),
