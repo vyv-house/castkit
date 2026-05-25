@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Screen Share — Viewer</title>
+<style>
+  :root {
+    --bg: #1a1a2e;
+    --panel: #16213e;
+    --accent: #0f3460;
+    --accent-hover: #1a4a7a;
+    --text: #e4e4e4;
+    --text-muted: #a0a0b0;
+    --success: #2ecc71;
+    --warn: #f1c40f;
+    --danger: #e74c3c;
+    --radius: 10px;
+    --shadow: 0 8px 24px rgba(0,0,0,0.35);
+    --transition: 0.25s ease;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; height: 100%; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple SD Gothic Neo", "Noto Sans", "Noto Sans CJK KR", sans-serif;
+    display: flex; flex-direction: column;
+  }
+
+  /* Top bar */
+  .topbar {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 12px 18px;
+    background: var(--panel);
+    border-bottom: 1px solid rgba(255,255,255,0.06);
+    gap: 12px; flex-wrap: wrap;
+  }
+  .topbar-left, .topbar-right { display: flex; align-items: center; gap: 12px; }
+  .btn {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 8px 12px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.08);
+    background: var(--accent); color: var(--text); cursor: pointer; font-size: 13px;
+    transition: background var(--transition), transform var(--transition);
+    text-decoration: none;
+  }
+  .btn:hover { background: var(--accent-hover); transform: translateY(-1px); }
+  .room-tag {
+    font-weight: 700; font-size: 14px; letter-spacing: 0.2px;
+    background: rgba(255,255,255,0.06); padding: 6px 10px; border-radius: 8px;
+  }
+  .stat {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 13px; color: var(--text-muted);
+    background: rgba(255,255,255,0.04); padding: 6px 10px; border-radius: 8px;
+  }
+  .status-dot {
+    width: 10px; height: 10px; border-radius: 50%; display: inline-block;
+    transition: background var(--transition), box-shadow var(--transition);
+  }
+  .status-dot.connected { background: var(--success); box-shadow: 0 0 8px rgba(46,204,113,0.55); }
+  .status-dot.reconnecting { background: var(--warn); box-shadow: 0 0 8px rgba(241,196,15,0.55); animation: pulse 1.2s ease-in-out infinite; }
+  .status-dot.disconnected { background: var(--danger); box-shadow: 0 0 8px rgba(231,76,60,0.55); }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+  /* Viewer area */
+  .viewer {
+    flex: 1; display: flex; flex-direction: column; overflow: hidden; position: relative;
+  }
+  .single-wrap {
+    flex: 1; display: grid; place-items: center; padding: 18px;
+  }
+  .single-wrap canvas {
+    max-width: 100%; max-height: 100%;
+    background: #0b0b18; border-radius: var(--radius);
+    box-shadow: var(--shadow); border: 1px solid rgba(255,255,255,0.06);
+  }
+  .grid-container {
+    flex: 1; display: grid; gap: 14px; padding: 14px; overflow: auto;
+    grid-template-columns: repeat(auto-fit, minmax(480px, 1fr));
+  }
+  .grid-cell {
+    background: var(--panel);
+    border: 1px solid rgba(255,255,255,0.06);
+    border-radius: var(--radius); overflow: hidden; position: relative;
+    display: flex; flex-direction: column;
+    transition: transform var(--transition), box-shadow var(--transition);
+  }
+  .grid-cell:hover { transform: translateY(-2px); box-shadow: var(--shadow); }
+  .canvas-wrap {
+    flex: 1; position: relative; background: #0b0b18;
+    aspect-ratio: 16 / 9;
+  }
+  .canvas-wrap canvas {
+    position: absolute; inset: 0; width: 100%; height: 100%; display: block;
+  }
+  .cell-overlay {
+    position: absolute; bottom: 0; left: 0; right: 0;
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px 10px;
+    background: linear-gradient(to top, rgba(0,0,0,0.55), rgba(0,0,0,0));
+    font-size: 12px; color: var(--text);
+  }
+  .cell-overlay .status-dot { width: 8px; height: 8px; }
+  .cell-label { font-weight: 600; }
+
+  /* Loading overlay */
+  .loading-overlay {
+    position: absolute; inset: 0; display: grid; place-items: center;
+    background: rgba(11,11,24,0.7); opacity: 0; pointer-events: none;
+    transition: opacity var(--transition);
+  }
+  .loading-overlay.active { opacity: 1; pointer-events: auto; }
+  .spinner-ring {
+    width: 44px; height: 44px; border: 3px solid rgba(255,255,255,0.12);
+    border-top-color: var(--text); border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* Fullscreen */
+  .viewer:fullscreen { background: var(--bg); }
+  .viewer:fullscreen .topbar { display: none; }
+  .viewer:fullscreen .single-wrap { padding: 0; }
+  .viewer:fullscreen .single-wrap canvas { border-radius: 0; border: none; }
+
+  .hint {
+    position: fixed; bottom: 12px; left: 50%; transform: translateX(-50%);
+    background: rgba(0,0,0,0.55); color: var(--text-muted); font-size: 12px;
+    padding: 6px 12px; border-radius: 999px; opacity: 0; transition: opacity var(--transition);
+    pointer-events: none;
+  }
+  .hint.show { opacity: 1; }
+
+  @media (max-width: 640px) {
+    .topbar { padding: 10px 12px; }
+    .grid-container { grid-template-columns: 1fr; padding: 10px; gap: 10px; }
+    .single-wrap { padding: 10px; }
+  }
+</style>
+</head>
+<body>
+<div class="viewer" id="viewer">
+  <div class="topbar">
+    <div class="topbar-left">
+      <a class="btn" href="index.html">← Rooms</a>
+      <span class="room-tag" id="roomTag">—</span>
+    </div>
+    <div class="topbar-right">
+      <span class="stat">Res: <strong id="resStat">—</strong></span>
+      <span class="stat">FPS: <strong id="fpsStat">—</strong></span>
+      <span class="stat"><span class="status-dot disconnected" id="connDot"></span><span id="connText">Disconnected</span></span>
+      <button class="btn" id="fsBtn">⛶ Fullscreen</button>
+    </div>
+  </div>
+
+  <div class="single-wrap" id="singleWrap" style="display:none">
+    <canvas id="singleCanvas"></canvas>
+    <div class="loading-overlay" id="singleLoading"><div class="spinner-ring"></div></div>
+  </div>
+
+  <div class="grid-container" id="gridContainer" style="display:none"></div>
+</div>
+
+<div class="hint" id="hint">Press F for fullscreen · ESC to exit</div>
+
+<script type="module">
+import { connectRoom, disconnectRoom, getConnection } from './js/app.js';
+import { GridManager } from './js/grid.js';
+
+const params = new URLSearchParams(window.location.search);
+const singleRoom = params.get('room');
+const multiRooms = (params.get('rooms') || '').split(',').map(s => s.trim()).filter(Boolean);
+
+const roomTag = document.getElementById('roomTag');
+const resStat = document.getElementById('resStat');
+const fpsStat = document.getElementById('fpsStat');
+const connDot = document.getElementById('connDot');
+const connText = document.getElementById('connText');
+const singleWrap = document.getElementById('singleWrap');
+const singleCanvas = document.getElementById('singleCanvas');
+const singleLoading = document.getElementById('singleLoading');
+const gridContainer = document.getElementById('gridContainer');
+const fsBtn = document.getElementById('fsBtn');
+const hint = document.getElementById('hint');
+
+function setStatus(status) {
+  connDot.className = 'status-dot ' + status;
+  connText.textContent = status === 'connected' ? 'Connected' : status === 'reconnecting' ? 'Reconnecting' : 'Disconnected';
+}
+
+function setupSingle(roomId) {
+  roomTag.textContent = roomId;
+  singleWrap.style.display = 'grid';
+  singleLoading.classList.add('active');
+
+  const conn = connectRoom(roomId, singleCanvas, window.location.host);
+  conn.onStatusChange = (status) => {
+    setStatus(status);
+    if (status === 'connected') {
+      singleLoading.classList.remove('active');
+    } else if (status === 'reconnecting') {
+      singleLoading.classList.add('active');
+    } else {
+      singleLoading.classList.remove('active');
+    }
+  };
+  conn.onFpsUpdate = (fps) => {
+    fpsStat.textContent = String(fps);
+  };
+
+  // Poll resolution from connection state
+  const resInterval = setInterval(() => {
+    const c = getConnection(roomId);
+    if (c && c.lastWidth && c.lastHeight) {
+      resStat.textContent = `${c.lastWidth}×${c.lastHeight}`;
+    }
+  }, 1000);
+
+  window.addEventListener('beforeunload', () => {
+    clearInterval(resInterval);
+    disconnectRoom(roomId);
+  });
+}
+
+function setupMulti(roomIds) {
+  roomTag.textContent = `${roomIds.length} rooms`;
+  gridContainer.style.display = 'grid';
+
+  const grid = new GridManager(gridContainer);
+  for (const roomId of roomIds) {
+    const canvas = grid.addRoom(roomId);
+    const conn = connectRoom(roomId, canvas, window.location.host);
+    conn.onStatusChange = (status) => grid.setStatus(roomId, status);
+  }
+
+  window.addEventListener('beforeunload', () => {
+    for (const roomId of roomIds) {
+      disconnectRoom(roomId);
+    }
+    grid.destroy();
+  });
+}
+
+if (singleRoom) {
+  setupSingle(singleRoom);
+} else if (multiRooms.length > 0) {
+  setupMulti(multiRooms);
+} else {
+  roomTag.textContent = 'No room selected';
+  singleWrap.style.display = 'grid';
+  singleLoading.classList.remove('active');
+}
+
+// Fullscreen
+function toggleFullscreen() {
+  const el = document.getElementById('viewer');
+  if (!document.fullscreenElement) {
+    el.requestFullscreen().catch(() => {});
+  } else {
+    document.exitFullscreen();
+  }
+}
+
+fsBtn.addEventListener('click', toggleFullscreen);
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'f' || e.key === 'F') {
+    toggleFullscreen();
+  }
+});
+
+// Hint
+setTimeout(() => hint.classList.add('show'), 600);
+setTimeout(() => hint.classList.remove('show'), 4200);
+</script>
+</body>
+</html>
