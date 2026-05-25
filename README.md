@@ -73,8 +73,25 @@ cargo run --release -p producer -- \
   --room-id my-room \
   --gateway-url ws://127.0.0.1:8080 \
   --secret changeme \
+  --profile low-latency \
+  --resolution p720 \
   --fps 30
 ```
+
+Useful producer policy flags:
+
+| Flag | Meaning |
+|------|---------|
+| `--profile low-latency\|balanced\|quality` | Applies default quality, encoder speed, keyframe interval, and queue depths for the latency/detail tradeoff |
+| `--resolution source\|p720\|p1080` | Captures at source size or a 16:9 preset; `--width`/`--height` override the preset |
+| `--quality 0.1..2.0` | VP8 bitrate/quantizer quality multiplier; lower favors latency and bandwidth |
+| `--keyframe-interval N` | Maximum encoded-frame interval between automatic keyframes |
+| `--capture-queue-depth N` | Bounded producer-side frame queue; stale queued frames are dropped before encode so the newest frame wins |
+| `--stream-queue-length N` | Native capture stream queue depth, clamped to the CoreGraphics-supported range |
+| `--write-timeout-ms N` | WebSocket write timeout to prevent send stalls from indefinitely blocking capture/encode |
+| `--stretch` | Stretch to the requested resolution instead of preserving aspect ratio with letterboxing |
+
+For Discord-like LAN viewing, start with `--profile low-latency --resolution p720 --fps 30`, then raise `--resolution`, `--quality`, or queue depths only if telemetry shows spare encode/send headroom.
 
 ### 3. Open the viewer
 
@@ -97,6 +114,7 @@ The producer logs one `producer telemetry` event per second. Useful fields:
 | `kbps` | WebSocket payload throughput sent by the producer |
 | `pipeline_busy_pct` | Conversion, encode, and send time as a percentage of wall-clock time; a producer CPU-pressure proxy |
 | `dropped_capture_frames` | Captured frames dropped because the encoder/send loop was backpressured |
+| `stale_frames_dropped` | Older queued producer frames discarded before encode so the viewer receives the freshest frame |
 | `avg_convert_ms` | Average BGRA→YUV conversion time per captured frame |
 | `avg_encode_ms` | Average VP8 encode time per captured frame |
 | `avg_send_ms` | Average WebSocket send time per packet |

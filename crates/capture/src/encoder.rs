@@ -14,8 +14,8 @@ use std::{ptr, slice};
 mod vpx_ffi {
     include!(concat!(env!("OUT_DIR"), "/vpx_ffi.rs"));
 }
-use vpx_ffi::*;
 use vp8e_enc_control_id::VP8E_SET_CPUUSED;
+use vpx_ffi::*;
 
 #[derive(Debug)]
 pub enum VpxError {
@@ -83,6 +83,7 @@ pub struct Vp8EncoderConfig {
     pub height: u32,
     pub quality: f32,
     pub keyframe_interval: Option<u32>,
+    pub cpu_used: i32,
 }
 
 impl Vp8Encoder {
@@ -123,7 +124,7 @@ impl Vp8Encoder {
         call_vpx!(vpx_codec_control_(
             &mut ctx,
             VP8E_SET_CPUUSED as _,
-            12 as c_int,
+            config.cpu_used.clamp(0, 16) as c_int,
         ));
 
         Ok(Self {
