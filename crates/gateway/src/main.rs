@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use axum::{Router, routing::get};
+use axum::{routing::get, Router};
 use clap::Parser;
 use tower_http::services::ServeDir;
 use tracing::info;

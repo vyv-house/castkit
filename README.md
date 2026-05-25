@@ -82,6 +82,59 @@ Navigate to `http://localhost:8080` to see live rooms, or go directly to `http:/
 
 Multi-view: `http://localhost:8080/viewer.html?rooms=room1,room2,room3`
 
+
+## Telemetry and benchmarking hooks
+
+The system exposes lightweight counters that are useful for LAN latency and throughput tuning without adding remote-control, recording, audio, account, or relay features.
+
+### Producer telemetry
+
+The producer logs one `producer telemetry` event per second. Useful fields:
+
+| Field | Meaning |
+|-------|---------|
+| `fps` | Captured frames per second over the last interval |
+| `kbps` | WebSocket payload throughput sent by the producer |
+| `pipeline_busy_pct` | Conversion, encode, and send time as a percentage of wall-clock time; a producer CPU-pressure proxy |
+| `dropped_capture_frames` | Captured frames dropped because the encoder/send loop was backpressured |
+| `avg_convert_ms` | Average BGRA→YUV conversion time per captured frame |
+| `avg_encode_ms` | Average VP8 encode time per captured frame |
+| `avg_send_ms` | Average WebSocket send time per packet |
+| `keyframes_sent` | Keyframes produced in the interval, including recovery requests |
+
+Run with info logging enabled while testing a room:
+
+```bash
+RUST_LOG=producer=info cargo run --release -p producer -- \
+  --room-id my-room \
+  --gateway-url ws://127.0.0.1:8080 \
+  --secret changeme \
+  --fps 30
+```
+
+### Gateway room metrics
+
+`GET /api/rooms` includes cumulative per-room `metrics`:
+
+| Field | Meaning |
+|-------|---------|
+| `packets_received` | Producer packets accepted by the gateway |
+| `keyframes_received` | Keyframes accepted by the gateway |
+| `bytes_received` | Encoded video bytes received, excluding the protocol header |
+| `force_keyframe_requests` | Viewer recovery requests forwarded toward the producer |
+| `watcher_lag_events` | Broadcast lag events observed by viewer sockets |
+| `watcher_lagged_frames` | Total skipped broadcast frames across lag events |
+| `last_timestamp_ms` | Latest producer timestamp observed by the gateway |
+| `uptime_ms` | Room lifetime used for average packet-rate calculations |
+
+The room directory displays the most important counters so an operator can spot low FPS, low throughput, lag, and keyframe-recovery churn before opening a stream.
+
+### Viewer telemetry overlay
+
+The multi-room viewer shows decoded FPS plus a per-stream metrics pill with received KiB/s, current and rolling p95 estimated local playout delay, decode queue depth, keyframe recovery time, and dropped frames. The delay estimate is a client-side clock-offset heuristic, intended for relative benchmarking across changes rather than absolute glass-to-glass measurement. The displayed drop total includes both pre-keyframe discard and decode-queue backpressure discard; the second number isolates decode-queue drops.
+
+For a baseline LAN benchmark, run the gateway and one or more producers for at least 60 seconds, then record producer logs, `/api/rooms`, and the viewer overlay while targeting 1080p/30fps and p95 estimated viewer delay under 200 ms; use the heuristic as a regression signal, not proof of absolute glass-to-glass latency.
+
 ## Wire Protocol
 
 Each producer-to-gateway and gateway-to-viewer WebSocket video message is a binary frame:

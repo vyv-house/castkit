@@ -61,12 +61,17 @@ export class MonitorGrid {
         const statusDot = document.createElement('span');
         statusDot.className = 'monitor-status-dot disconnected';
 
+        const metrics = document.createElement('span');
+        metrics.className = 'monitor-metrics';
+        metrics.textContent = '--';
+
         const resizeHandle = document.createElement('div');
         resizeHandle.className = 'monitor-resize-handle';
 
         overlay.appendChild(roomName);
         overlay.appendChild(fps);
         overlay.appendChild(resolution);
+        overlay.appendChild(metrics);
         overlay.appendChild(statusDot);
         element.appendChild(canvas);
         element.appendChild(overlay);
@@ -82,6 +87,7 @@ export class MonitorGrid {
             element,
             fps,
             resolution,
+            metrics,
             statusDot,
             colSpan: 1,
             rowSpan: 1,
@@ -122,12 +128,44 @@ export class MonitorGrid {
         monitor.resolution.textContent = `${width}×${height}`;
     }
 
+    setMetrics(roomId, metrics) {
+        const monitor = this.monitors.get(roomId);
+        if (!monitor) return;
+
+        if (metrics.connected === false) {
+            monitor.metrics.textContent = '--';
+            return;
+        }
+
+        const parts = [];
+        if (Number.isFinite(metrics.receivedBytesPerSecond)) {
+            parts.push(`${Math.round(metrics.receivedBytesPerSecond / 1024)} KiB/s`);
+        }
+        if (Number.isFinite(metrics.estimatedDelayMs)) {
+            parts.push(`${Math.round(metrics.estimatedDelayMs)} ms`);
+        }
+        if (Number.isFinite(metrics.p95EstimatedDelayMs)) {
+            parts.push(`p95 ${Math.round(metrics.p95EstimatedDelayMs)} ms`);
+        }
+        if (Number.isFinite(metrics.decodeQueueSize)) {
+            parts.push(`q${metrics.decodeQueueSize}`);
+        }
+        if (Number.isFinite(metrics.latestKeyframeRecoveryMs)) {
+            parts.push(`kf ${Math.round(metrics.latestKeyframeRecoveryMs)} ms`);
+        }
+        if (metrics.droppedFrames || metrics.decodeQueueDrops) {
+            parts.push(`drop ${metrics.droppedFrames || 0}/${metrics.decodeQueueDrops || 0}`);
+        }
+        monitor.metrics.textContent = parts.length ? parts.join(' · ') : '--';
+    }
+
     setError(roomId, message) {
         const monitor = this.monitors.get(roomId);
         if (!monitor) return;
 
         monitor.fps.textContent = 'error';
         monitor.resolution.textContent = message;
+        monitor.metrics.textContent = '--';
     }
 
     destroy() {
@@ -178,11 +216,13 @@ export class MonitorGrid {
 }
 .monitor-panel:hover .monitor-overlay { opacity: 1; }
 .monitor-room-name { font-weight: 700; }
-.monitor-fps {
+.monitor-fps,
+.monitor-metrics {
     background: rgba(255,255,255,0.1);
     padding: 2px 6px;
     border-radius: 4px;
 }
+.monitor-metrics { color: #b9d7ff; }
 .monitor-status-dot {
     width: 8px; height: 8px;
     border-radius: 50%;

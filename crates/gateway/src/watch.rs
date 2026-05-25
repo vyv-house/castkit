@@ -7,8 +7,8 @@ use axum::response::IntoResponse;
 use tokio::sync::{broadcast, mpsc};
 use tracing::warn;
 
-use crate::AppState;
 use crate::room::{ProducerCommand, Room};
+use crate::AppState;
 
 pub async fn handle_watch(
     ws: WebSocketUpgrade,
@@ -62,6 +62,7 @@ async fn forward_frames(
                 }
             }
             Err(broadcast::error::RecvError::Lagged(n)) => {
+                room.record_watcher_lag(n);
                 warn!(room_id = %room.id, skipped = n, "watcher lagged behind broadcast");
             }
             Err(broadcast::error::RecvError::Closed) => break,
@@ -92,6 +93,8 @@ async fn run_watcher_socket(
                     Some(Ok(Message::Text(text))) if text == "keyframe" => {
                         if let Err(err) = room.producer_cmd.send(ProducerCommand::ForceKeyframe).await {
                             warn!(room_id = %room.id, error = %err, "failed to request keyframe");
+                        } else {
+                            room.record_force_keyframe_request();
                         }
                     }
                     Some(Ok(Message::Close(_))) | None => break,
