@@ -84,7 +84,7 @@ Multi-view: `http://localhost:8080/viewer.html?rooms=room1,room2,room3`
 
 ## Wire Protocol
 
-Each WebSocket message is a binary frame:
+Each producer-to-gateway and gateway-to-viewer WebSocket video message is a binary frame:
 
 | Offset | Size | Field |
 |--------|------|-------|
@@ -93,6 +93,14 @@ Each WebSocket message is a binary frame:
 | 5 | 2 | Width (big-endian) |
 | 7 | 2 | Height (big-endian) |
 | 9 | ... | VP8 payload |
+
+Viewer-to-gateway control messages currently use a text WebSocket command:
+
+| Message | Meaning |
+|---------|---------|
+| `keyframe` | Ask the gateway to forward a force-keyframe request to the producer. |
+
+The gateway forwards that request to the producer as an empty binary frame with type `0x04`.
 
 ## License
 

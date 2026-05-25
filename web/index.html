@@ -42,7 +42,7 @@
   }
   .brand h1 { margin: 0; font-size: 22px; letter-spacing: 0.2px; }
   .sub { color: var(--text-muted); font-size: 13px; margin-top: 2px; }
-  .actions { display: flex; gap: 10px; align-items: center; }
+  .actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
   .btn {
     display: inline-flex; align-items: center; gap: 8px;
     padding: 10px 16px; border-radius: 10px; border: 1px solid rgba(255,255,255,0.08);
@@ -53,12 +53,21 @@
   .btn:hover { background: var(--accent-hover); transform: translateY(-1px); box-shadow: var(--shadow); }
   .btn.primary { background: var(--accent); border-color: rgba(255,255,255,0.12); }
   .btn.primary:hover { background: var(--accent-hover); }
+  .btn.viewer {
+    padding: 12px 18px;
+    font-size: 15px;
+    font-weight: 700;
+    background: linear-gradient(135deg, #1a4a7a 0%, #0f3460 100%);
+    box-shadow: 0 10px 24px rgba(15,52,96,0.28);
+  }
+  .btn.viewer:hover { background: linear-gradient(135deg, #215b92 0%, #1a4a7a 100%); }
 
   main { padding: 28px 32px; }
   .toolbar {
-    display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px;
+    display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 20px;
   }
   .count { color: var(--text-muted); font-size: 14px; }
+  .toolbar-actions { display: flex; gap: 10px; align-items: center; }
   .spinner {
     width: 18px; height: 18px; border: 2px solid rgba(255,255,255,0.15);
     border-top-color: var(--text); border-radius: 50%;
@@ -80,6 +89,11 @@
     cursor: pointer;
     transition: transform var(--transition), box-shadow var(--transition), border-color var(--transition);
     position: relative; overflow: hidden;
+  }
+  .room-card-link {
+    display: block;
+    color: inherit;
+    text-decoration: none;
   }
   .room-card::before {
     content: ''; position: absolute; inset: 0; opacity: 0;
@@ -117,7 +131,9 @@
 
   @media (max-width: 640px) {
     header { padding: 16px 18px; flex-direction: column; align-items: flex-start; gap: 10px; }
+    .actions { width: 100%; justify-content: flex-start; }
     main { padding: 16px 18px; }
+    .toolbar { flex-direction: column; align-items: flex-start; }
     .grid { grid-template-columns: 1fr; }
   }
 </style>
@@ -133,13 +149,16 @@
   </div>
   <div class="actions">
     <div class="spinner" id="spinner"></div>
-    <a class="btn primary" href="viewer.html">Multi-View</a>
+    <a class="btn primary viewer" href="viewer.html">Open Viewer</a>
   </div>
 </header>
 
 <main>
   <div class="toolbar">
     <div class="count" id="count">Loading rooms…</div>
+    <div class="toolbar-actions">
+      <a class="btn" href="viewer.html">Watch All</a>
+    </div>
   </div>
   <div class="grid" id="grid"></div>
   <div class="empty" id="empty" style="display:none">
@@ -150,9 +169,7 @@
 
 <div class="error-toast" id="toast"></div>
 
-<script type="module">
-import { fetchRooms } from './js/app.js';
-
+<script>
 const grid = document.getElementById('grid');
 const empty = document.getElementById('empty');
 const countEl = document.getElementById('count');
@@ -166,8 +183,12 @@ function showToast(msg) {
 }
 
 function renderCard(room) {
-  const card = document.createElement('div');
-  card.className = 'room-card';
+  const card = document.createElement('a');
+  card.className = 'room-card room-card-link';
+  card.href = `viewer.html?rooms=${encodeURIComponent(room.id)}`;
+  const width = Number(room.width) || 0;
+  const height = Number(room.height) || 0;
+  const watchers = Number(room.watchers) || 0;
   const active = room.active ? 'green' : 'red';
   const label = room.active ? 'Active' : 'Inactive';
   card.innerHTML = `
@@ -176,13 +197,10 @@ function renderCard(room) {
       <div class="badge">${label}</div>
     </div>
     <div class="room-meta">
-      <div class="meta-item"><span class="meta-dot ${active}"></span>${room.width}×${room.height}</div>
-      <div class="meta-item"><span class="meta-dot ${active}"></span>${room.watchers} watcher${room.watchers === 1 ? '' : 's'}</div>
+      <div class="meta-item"><span class="meta-dot ${active}"></span>${width}×${height}</div>
+      <div class="meta-item"><span class="meta-dot ${active}"></span>${watchers} watcher${watchers === 1 ? '' : 's'}</div>
     </div>
   `;
-  card.addEventListener('click', () => {
-    window.location.href = `viewer.html?room=${encodeURIComponent(room.id)}`;
-  });
   return card;
 }
 
@@ -193,7 +211,9 @@ function escapeHtml(str) {
 async function load() {
   spinner.classList.add('active');
   try {
-    const rooms = await fetchRooms(window.location.host);
+    const res = await fetch('/api/rooms');
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const rooms = await res.json();
     spinner.classList.remove('active');
     grid.innerHTML = '';
     if (!rooms || rooms.length === 0) {

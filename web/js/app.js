@@ -1,244 +1,175 @@
-/**
- * app.js — main application logic for screen-share web viewer
- */
-import { VP8Decoder } from './decoder.js';
-import { JitterBuffer } from './jitter-buffer.js';
+import { MonitorGrid } from './grid.js';
 
-const HEADER_SIZE = 9;
-const TYPE_KEYFRAME = 0x01;
-const TYPE_DELTA = 0x02;
-const TYPE_META = 0x03;
-const TYPE_FORCE_KEYFRAME = 0x04;
+export class StreamManager {
+    static MonitorGrid = MonitorGrid;
 
-const connections = new Map(); // roomId -> connection state
+    constructor(grid, baseUrl, options = {}) {
+        this.grid = grid;
+        this.baseUrl = baseUrl;
+        this.maxStreams = options.maxStreams || 12;
+        this.streams = new Map();
+        this.elements = new Map();
+        this.pinnedRooms = new Set();
+        this.autoAddInterval = null;
+    }
+
+    addStream(roomId, options = {}) {
+        if (options.pinned) {
+            this.pinnedRooms.add(roomId);
+        }
+        if (this.streams.has(roomId)) {
+            return this.streams.get(roomId);
+        }
+        if (this.streams.size >= this.maxStreams) {
+            console.warn(`Stream limit reached; not adding ${roomId}`);
+            return null;
+        }
+
+        const { canvas, element } = this.grid.addMonitor(roomId);
+        this.elements.set(roomId, element);
+        this.grid.setStatus(roomId, 'disconnected');
+
+        if (!canvas.transferControlToOffscreen || typeof Worker === 'undefined') {
+            this.streams.set(roomId, null);
+            this.grid.setStatus(roomId, 'disconnected');
+            this.grid.setError(roomId, 'Unsupported browser');
+            console.warn('This browser does not support worker-based canvas rendering');
+            return null;
+        }
+
+        let offscreen;
+        let worker;
+        try {
+            offscreen = canvas.transferControlToOffscreen();
+            worker = new Worker(new URL('./stream-worker.js', import.meta.url));
+        } catch (error) {
+            this.streams.set(roomId, null);
+            this.grid.setStatus(roomId, 'disconnected');
+            this.grid.setError(roomId, 'Worker failed');
+            console.warn(`Failed to start stream worker for ${roomId}:`, error);
+            return null;
+        }
+
+        worker.addEventListener('message', (event) => {
+            const message = event.data;
+
+            if (message.type === 'fps') {
+                this.grid.setFps(roomId, message.value);
+            } else if (message.type === 'status') {
+                const status = message.connected
+                    ? 'connected'
+                    : message.reconnecting
+                        ? 'reconnecting'
+                        : 'disconnected';
+                this.grid.setStatus(roomId, status);
+            } else if (message.type === 'resolution') {
+                this.grid.setResolution(roomId, message.width, message.height);
+            } else if (message.type === 'fatal') {
+                this.grid.setStatus(roomId, 'disconnected');
+                this.grid.setError(roomId, message.message || 'Unsupported browser');
+                console.warn(`Stream worker fatal error for ${roomId}:`, message.message);
+            } else if (message.type === 'error') {
+                console.warn(`Stream worker error for ${roomId}:`, message.message);
+            }
+        });
+
+        worker.addEventListener('error', (error) => {
+            this.grid.setStatus(roomId, 'disconnected');
+            this.grid.setError(roomId, error.message || 'Worker failed');
+            console.warn(`Stream worker failed for ${roomId}:`, error.message || error);
+        });
+
+        worker.postMessage({
+            type: 'start',
+            canvas: offscreen,
+            wsUrl: this.createWatchUrl(roomId),
+        }, [offscreen]);
+
+        this.streams.set(roomId, worker);
+        return worker;
+    }
+
+    createWatchUrl(roomId) {
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        return `${protocol}//${this.baseUrl}/watch/${encodeURIComponent(roomId)}`;
+    }
+
+    removeStream(roomId) {
+        if (!this.streams.has(roomId)) {
+            return;
+        }
+
+        const worker = this.streams.get(roomId);
+        if (worker) {
+            worker.terminate();
+        }
+        this.grid.removeMonitor(roomId);
+        this.elements.delete(roomId);
+        this.streams.delete(roomId);
+        this.pinnedRooms.delete(roomId);
+    }
+
+    removeAll() {
+        for (const roomId of Array.from(this.streams.keys())) {
+            this.removeStream(roomId);
+        }
+    }
+
+    startAutoAdd() {
+        if (this.autoAddInterval) {
+            return;
+        }
+
+        let syncInFlight = false;
+        const syncRooms = async () => {
+            if (syncInFlight) {
+                return;
+            }
+
+            syncInFlight = true;
+            try {
+                const rooms = await fetchRooms(this.baseUrl);
+                const roomIds = new Set(rooms.map((room) => room.id).filter(Boolean));
+
+                for (const roomId of roomIds) {
+                    if (!this.streams.has(roomId)) {
+                        try {
+                            this.addStream(roomId);
+                        } catch (error) {
+                            console.warn(`Failed to add stream ${roomId}:`, error);
+                        }
+                    }
+                }
+
+                for (const roomId of Array.from(this.streams.keys())) {
+                    if (!roomIds.has(roomId) && !this.pinnedRooms.has(roomId)) {
+                        this.removeStream(roomId);
+                    }
+                }
+            } catch (error) {
+                console.warn('Failed to fetch rooms:', error);
+            } finally {
+                syncInFlight = false;
+            }
+        };
+
+        syncRooms();
+        this.autoAddInterval = setInterval(syncRooms, 3000);
+    }
+
+    stopAutoAdd() {
+        if (!this.autoAddInterval) {
+            return;
+        }
+
+        clearInterval(this.autoAddInterval);
+        this.autoAddInterval = null;
+    }
+}
 
 export async function fetchRooms(baseUrl) {
-    const res = await fetch(`http://${baseUrl}/api/rooms`);
+    void baseUrl;
+    const res = await fetch(`/api/rooms`);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     return res.json();
-}
-
-class RoomConnection {
-    constructor(roomId, canvas, baseUrl) {
-        this.roomId = roomId;
-        this.canvas = canvas;
-        this.baseUrl = baseUrl;
-        this.decoder = new VP8Decoder(canvas);
-        this.jitter = new JitterBuffer(50);
-        this.ws = null;
-        this.connected = false;
-        this.reconnecting = false;
-        this.reconnectDelay = 1000;
-        this.maxReconnectDelay = 10000;
-        this.reconnectTimer = null;
-        this.rafId = null;
-        this.lastWidth = 0;
-        this.lastHeight = 0;
-        this.frameCount = 0;
-        this.lastFpsTime = 0;
-        this.fps = 0;
-        this.onStatusChange = null;
-        this.onFpsUpdate = null;
-        this._onMessage = this._onMessage.bind(this);
-        this._onClose = this._onClose.bind(this);
-        this._onError = this._onError.bind(this);
-        this._onOpen = this._onOpen.bind(this);
-        this._drain = this._drain.bind(this);
-    }
-
-    connect() {
-        this._clearReconnect();
-        this.reconnecting = true;
-        this._notifyStatus();
-
-        const url = `ws://${this.baseUrl}/watch/${this.roomId}`;
-        try {
-            this.ws = new WebSocket(url);
-        } catch (e) {
-            this._scheduleReconnect();
-            return;
-        }
-        this.ws.binaryType = 'arraybuffer';
-        this.ws.onopen = this._onOpen;
-        this.ws.onmessage = this._onMessage;
-        this.ws.onclose = this._onClose;
-        this.ws.onerror = this._onError;
-    }
-
-    _onOpen() {
-        this.connected = true;
-        this.reconnecting = false;
-        this.reconnectDelay = 1000;
-        this._notifyStatus();
-        this._startDrainLoop();
-    }
-
-    _onMessage(event) {
-        const msg = event.data;
-        if (typeof msg === 'string') {
-            // text messages ignored for now
-            return;
-        }
-        if (!(msg instanceof ArrayBuffer)) return;
-        if (msg.byteLength < HEADER_SIZE) return;
-
-        const view = new DataView(msg);
-        const type = view.getUint8(0);
-        const timestamp = view.getUint32(1, false); // big-endian
-        const width = view.getUint16(5, false);
-        const height = view.getUint16(7, false);
-        const payload = new Uint8Array(msg, HEADER_SIZE);
-
-        if (type === TYPE_META) {
-            try {
-                const text = new TextDecoder().decode(payload);
-                const meta = JSON.parse(text);
-                if (meta.width && meta.height) {
-                    this._configure(meta.width, meta.height);
-                }
-            } catch (e) {
-                // ignore malformed meta
-            }
-            return;
-        }
-
-        if (type === TYPE_FORCE_KEYFRAME) {
-            if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-                this.ws.send('keyframe');
-            }
-            return;
-        }
-
-        if (width > 0 && height > 0 && (width !== this.lastWidth || height !== this.lastHeight)) {
-            this._configure(width, height);
-        }
-
-        this.jitter.push({ type, timestamp, data: payload });
-    }
-
-    _configure(width, height) {
-        this.lastWidth = width;
-        this.lastHeight = height;
-        this.canvas.width = width;
-        this.canvas.height = height;
-        this.decoder.configure(width, height).catch((e) => {
-            console.warn('Decoder configure failed:', e);
-        });
-        if (this.onStatusChange) this.onStatusChange(this._getStatus());
-    }
-
-    _drain() {
-        this.rafId = requestAnimationFrame(this._drain);
-        const nowMs = performance.now();
-        const frames = this.jitter.drain(nowMs);
-        for (const f of frames) {
-            this.decoder.decode(f.type, f.timestamp, f.data);
-            this.frameCount++;
-        }
-        if (nowMs - this.lastFpsTime >= 1000) {
-            this.fps = this.frameCount;
-            this.frameCount = 0;
-            this.lastFpsTime = nowMs;
-            if (this.onFpsUpdate) this.onFpsUpdate(this.fps);
-        }
-        if (this.decoder.requestKeyframe()) {
-            if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-                this.ws.send('keyframe');
-            }
-        }
-    }
-
-    _startDrainLoop() {
-        if (this.rafId) return;
-        this.lastFpsTime = performance.now();
-        this.frameCount = 0;
-        this.rafId = requestAnimationFrame(this._drain);
-    }
-
-    _stopDrainLoop() {
-        if (this.rafId) {
-            cancelAnimationFrame(this.rafId);
-            this.rafId = null;
-        }
-    }
-
-    _onClose() {
-        this.connected = false;
-        this._notifyStatus();
-        this._stopDrainLoop();
-        this._scheduleReconnect();
-    }
-
-    _onError(err) {
-        console.warn('WebSocket error for room', this.roomId, err);
-        this.connected = false;
-        this._notifyStatus();
-    }
-
-    _scheduleReconnect() {
-        this._clearReconnect();
-        this.reconnecting = true;
-        this._notifyStatus();
-        this.reconnectTimer = setTimeout(() => {
-            this.reconnectDelay = Math.min(this.reconnectDelay * 2, this.maxReconnectDelay);
-            this.connect();
-        }, this.reconnectDelay);
-    }
-
-    _clearReconnect() {
-        if (this.reconnectTimer) {
-            clearTimeout(this.reconnectTimer);
-            this.reconnectTimer = null;
-        }
-    }
-
-    _getStatus() {
-        if (this.connected) return 'connected';
-        if (this.reconnecting) return 'reconnecting';
-        return 'disconnected';
-    }
-
-    _notifyStatus() {
-        if (this.onStatusChange) this.onStatusChange(this._getStatus());
-    }
-
-    disconnect() {
-        this._clearReconnect();
-        this._stopDrainLoop();
-        if (this.ws) {
-            try {
-                this.ws.close();
-            } catch (e) {
-                // ignore
-            }
-            this.ws = null;
-        }
-        this.decoder.destroy();
-        this.jitter.clear();
-        this.connected = false;
-        this.reconnecting = false;
-        this._notifyStatus();
-    }
-}
-
-export function connectRoom(roomId, canvas, baseUrl) {
-    if (connections.has(roomId)) {
-        connections.get(roomId).disconnect();
-    }
-    const conn = new RoomConnection(roomId, canvas, baseUrl);
-    connections.set(roomId, conn);
-    conn.connect();
-    return conn;
-}
-
-export function disconnectRoom(roomId) {
-    const conn = connections.get(roomId);
-    if (conn) {
-        conn.disconnect();
-        connections.delete(roomId);
-    }
-}
-
-export function getConnection(roomId) {
-    return connections.get(roomId) || null;
 }
