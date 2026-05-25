@@ -1,0 +1,16 @@
+[package]
+name = "producer"
+version = "0.1.0"
+edition.workspace = true
+
+[dependencies]
+shared = { path = "../shared" }
+capture = { path = "../capture" }
+tokio = { workspace = true }
+tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
+bytes = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { workspace = true }
+crossbeam-channel = "0.5"
+url = "2"
