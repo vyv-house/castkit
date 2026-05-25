@@ -10,6 +10,7 @@
     const MAX_RECONNECT = 30000;
     const MAX_DECODE_QUEUE = 5;
     const MIN_KEYFRAME_REQUEST_INTERVAL_MS = 500;
+    const DELAY_SAMPLE_WINDOW = 120;
 
     let canvas = null;
     let ctx = null;
@@ -23,6 +24,21 @@
     let fpsTimer = null;
     let frameCount = 0;
     let lastFpsTime = performance.now();
+    let bytesSinceLastReport = 0;
+    let totalBytesReceived = 0;
+    let decodedFrames = 0;
+    let droppedFrames = 0;
+    let decodeQueueDrops = 0;
+    let keyframeRequests = 0;
+    let keyframeRequestsSent = 0;
+    let pendingKeyframeRequestAt = null;
+    let pendingKeyframeAfterTimestampMs = null;
+    let latestKeyframeRecoveryMs = null;
+    let firstFrameClockOffset = null;
+    let latestEstimatedDelayMs = null;
+    let p95EstimatedDelayMs = null;
+    let delaySamples = [];
+    let lastVideoTimestampMs = null;
     let seenKeyframe = false;
     let needsKeyframe = true;
     let currentWidth = 0;
@@ -52,6 +68,21 @@
         reconnectDelay = 1000;
         frameCount = 0;
         lastFpsTime = performance.now();
+        bytesSinceLastReport = 0;
+        totalBytesReceived = 0;
+        decodedFrames = 0;
+        droppedFrames = 0;
+        decodeQueueDrops = 0;
+        keyframeRequests = 0;
+        keyframeRequestsSent = 0;
+        pendingKeyframeRequestAt = null;
+        pendingKeyframeAfterTimestampMs = null;
+        latestKeyframeRecoveryMs = null;
+        firstFrameClockOffset = null;
+        latestEstimatedDelayMs = null;
+        p95EstimatedDelayMs = null;
+        delaySamples = [];
+        lastVideoTimestampMs = null;
 
         if (!canvas || !wsUrl) {
             postError('Missing canvas or WebSocket URL');
@@ -117,6 +148,21 @@
         currentWidth = 0;
         currentHeight = 0;
         frameCount = 0;
+        bytesSinceLastReport = 0;
+        totalBytesReceived = 0;
+        decodedFrames = 0;
+        droppedFrames = 0;
+        decodeQueueDrops = 0;
+        keyframeRequests = 0;
+        keyframeRequestsSent = 0;
+        pendingKeyframeRequestAt = null;
+        pendingKeyframeAfterTimestampMs = null;
+        latestKeyframeRecoveryMs = null;
+        firstFrameClockOffset = null;
+        latestEstimatedDelayMs = null;
+        p95EstimatedDelayMs = null;
+        delaySamples = [];
+        lastVideoTimestampMs = null;
         lastKeyframeRequestTime = 0;
     }
 
@@ -142,11 +188,12 @@
                 return;
             }
             reconnectDelay = 1000;
+            resetConnectionTiming();
             resetDecodeQueue(true);
             seenKeyframe = false;
             needsKeyframe = true;
             self.postMessage({ type: 'status', connected: true, reconnecting: false });
-            requestKeyframe(true);
+            requestKeyframe(true, false);
         };
 
         ws.onmessage = (event) => {
@@ -166,6 +213,7 @@
             ws = null;
             seenKeyframe = false;
             needsKeyframe = true;
+            resetConnectionTiming();
             self.postMessage({ type: 'status', connected: false, reconnecting: false });
             if (!stopped) {
                 scheduleReconnect();
@@ -199,8 +247,26 @@
             const now = performance.now();
             const elapsed = (now - lastFpsTime) / 1000;
             const fps = elapsed > 0 ? Math.round(frameCount / elapsed) : 0;
-            self.postMessage({ type: 'fps', value: fps });
+            const receivedBytesPerSecond = elapsed > 0 ? bytesSinceLastReport / elapsed : 0;
+            const connected = ws && ws.readyState === WebSocket.OPEN;
+            self.postMessage({
+                type: 'metrics',
+                fps,
+                connected,
+                receivedBytesPerSecond,
+                totalBytesReceived,
+                decodedFrames,
+                droppedFrames,
+                decodeQueueDrops,
+                keyframeRequests,
+                keyframeRequestsSent,
+                decodeQueueSize: decoder && connected ? decoder.decodeQueueSize : 0,
+                estimatedDelayMs: connected ? latestEstimatedDelayMs : null,
+                p95EstimatedDelayMs: connected ? p95EstimatedDelayMs : null,
+                latestKeyframeRecoveryMs: connected ? latestKeyframeRecoveryMs : null,
+            });
             frameCount = 0;
+            bytesSinceLastReport = 0;
             lastFpsTime = now;
         }, 1000);
     }
@@ -224,6 +290,8 @@
         const width = view.getUint16(5, false);
         const height = view.getUint16(7, false);
         const payload = new Uint8Array(data, HEADER_SIZE);
+        bytesSinceLastReport += data.byteLength;
+        totalBytesReceived += data.byteLength;
 
         if (frameType === TYPE_META) {
             handleResolution(width, height);
@@ -232,7 +300,7 @@
 
         if (frameType === TYPE_FORCE_KEYFRAME) {
             needsKeyframe = true;
-            requestKeyframe(true);
+            requestKeyframe(true, true);
             return;
         }
 
@@ -241,6 +309,20 @@
         }
 
         const isKey = frameType === TYPE_KEYFRAME;
+        if (firstFrameClockOffset === null) {
+            firstFrameClockOffset = performance.now() - timestamp;
+        }
+
+        if (
+            isKey
+            && pendingKeyframeRequestAt !== null
+            && (pendingKeyframeAfterTimestampMs === null || timestamp > pendingKeyframeAfterTimestampMs)
+        ) {
+            latestKeyframeRecoveryMs = performance.now() - pendingKeyframeRequestAt;
+            pendingKeyframeRequestAt = null;
+            pendingKeyframeAfterTimestampMs = null;
+        }
+        lastVideoTimestampMs = timestamp;
 
         if (width !== currentWidth || height !== currentHeight) {
             handleResolution(width, height);
@@ -255,7 +337,7 @@
 
         if (!decoder || !currentConfig) {
             needsKeyframe = true;
-            requestKeyframe();
+            requestKeyframe(false, true);
             return;
         }
 
@@ -265,7 +347,7 @@
             configureDecoder(currentWidth, currentHeight);
             seenKeyframe = false;
             needsKeyframe = true;
-            requestKeyframe(true);
+            requestKeyframe(true, true);
             return;
         }
 
@@ -277,16 +359,21 @@
                 needsKeyframe = true;
                 postError(err.message || 'Failed to reconfigure decoder');
                 closeDecoder();
-                requestKeyframe();
+                requestKeyframe(false, true);
                 return;
             }
         }
 
         if (!isKey && (!seenKeyframe || needsKeyframe)) {
+            droppedFrames++;
+            requestKeyframe(false, true);
             return;
         }
 
         if (decoder.decodeQueueSize > MAX_DECODE_QUEUE) {
+            const queuedDrops = Math.max(1, decoder.decodeQueueSize);
+            decodeQueueDrops += queuedDrops;
+            droppedFrames += queuedDrops;
             resetDecoderForBackpressure();
             return;
         }
@@ -306,7 +393,7 @@
         } catch (err) {
             needsKeyframe = true;
             postError(err.message || 'Failed to decode frame');
-            requestKeyframe();
+            requestKeyframe(false, true);
         }
     }
 
@@ -331,16 +418,25 @@
                         frame.close();
                         return;
                     }
+                    const frameTimestampMs = frame.timestamp / 1000;
+                    if (firstFrameClockOffset !== null) {
+                        latestEstimatedDelayMs = Math.max(
+                            0,
+                            performance.now() - (frameTimestampMs + firstFrameClockOffset),
+                        );
+                        recordDelaySample(latestEstimatedDelayMs);
+                    }
                     ctx.drawImage(frame, 0, 0, canvas.width, canvas.height);
                     frame.close();
                     frameCount++;
+                    decodedFrames++;
                 },
                 error: (err) => {
                     seenKeyframe = false;
                     needsKeyframe = true;
                     postError(err.message || 'VideoDecoder error');
                     closeDecoder();
-                    requestKeyframe();
+                    requestKeyframe(false, true);
                 },
             });
         }
@@ -374,7 +470,7 @@
 
         seenKeyframe = false;
         needsKeyframe = true;
-        requestKeyframe();
+        requestKeyframe(false, true);
     }
 
     function resetDecodeQueue(reconfigure) {
@@ -409,6 +505,30 @@
         currentConfig = null;
     }
 
+    function resetConnectionTiming() {
+        firstFrameClockOffset = null;
+        latestEstimatedDelayMs = null;
+        p95EstimatedDelayMs = null;
+        delaySamples = [];
+        pendingKeyframeRequestAt = null;
+        pendingKeyframeAfterTimestampMs = null;
+        latestKeyframeRecoveryMs = null;
+        lastVideoTimestampMs = null;
+    }
+
+    function recordDelaySample(delayMs) {
+        if (!Number.isFinite(delayMs)) {
+            return;
+        }
+        delaySamples.push(delayMs);
+        if (delaySamples.length > DELAY_SAMPLE_WINDOW) {
+            delaySamples.shift();
+        }
+        const sorted = delaySamples.slice().sort((a, b) => a - b);
+        const index = Math.min(sorted.length - 1, Math.ceil(sorted.length * 0.95) - 1);
+        p95EstimatedDelayMs = sorted[Math.max(0, index)];
+    }
+
     function handleResolution(width, height) {
         if (!width || !height || (width === currentWidth && height === currentHeight)) {
             return;
@@ -425,8 +545,9 @@
         self.postMessage({ type: 'resolution', width: width, height: height });
     }
 
-    function requestKeyframe(force) {
+    function requestKeyframe(force, trackRecovery) {
         const now = performance.now();
+        keyframeRequests++;
         if (!force && now - lastKeyframeRequestTime < MIN_KEYFRAME_REQUEST_INTERVAL_MS) {
             return;
         }
@@ -434,6 +555,11 @@
         if (ws && ws.readyState === WebSocket.OPEN) {
             try {
                 ws.send(COMMAND_KEYFRAME);
+                keyframeRequestsSent++;
+                if (trackRecovery) {
+                    pendingKeyframeRequestAt = now;
+                    pendingKeyframeAfterTimestampMs = lastVideoTimestampMs;
+                }
                 lastKeyframeRequestTime = now;
             } catch (err) {
                 postError(err.message || 'Failed to request keyframe');

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
@@ -10,8 +10,8 @@ use bytes::Bytes;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
-use crate::AppState;
 use crate::room::{ProducerCommand, Room};
+use crate::AppState;
 
 pub async fn handle_ingest(
     ws: WebSocketUpgrade,
@@ -75,10 +75,12 @@ async fn run_producer_socket(
 }
 
 fn handle_frame(room: &Room, frame: Bytes) {
-    let Some((header, _)) = shared::decode_frame(&frame) else {
+    let Some((header, payload)) = shared::decode_frame(&frame) else {
         warn!(room_id = %room.id, "dropping malformed producer frame");
         return;
     };
+
+    room.record_frame(&header, payload.len());
 
     if header.width > 0 && header.height > 0 {
         room.width.store(header.width as usize, Ordering::Relaxed);

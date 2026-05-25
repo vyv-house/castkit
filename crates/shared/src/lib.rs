@@ -23,12 +23,25 @@ pub struct EncodedPacket {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RoomMetrics {
+    pub packets_received: u64,
+    pub keyframes_received: u64,
+    pub bytes_received: u64,
+    pub force_keyframe_requests: u64,
+    pub watcher_lag_events: u64,
+    pub watcher_lagged_frames: u64,
+    pub last_timestamp_ms: u32,
+    pub uptime_ms: u64,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RoomInfo {
     pub id: String,
     pub width: u16,
     pub height: u16,
     pub watchers: usize,
     pub active: bool,
+    pub metrics: RoomMetrics,
 }
 
 pub fn encode_frame(header: &FrameHeader, payload: &[u8]) -> Bytes {
@@ -71,7 +84,8 @@ mod tests {
         let payload = b"hello screen-share";
 
         let encoded = encode_frame(&header, payload);
-        let (decoded_header, decoded_payload) = decode_frame(&encoded).expect("frame should decode");
+        let (decoded_header, decoded_payload) =
+            decode_frame(&encoded).expect("frame should decode");
 
         assert_eq!(header, decoded_header);
         assert_eq!(payload, decoded_payload);
@@ -87,7 +101,8 @@ mod tests {
         };
 
         let encoded = encode_frame(&header, &[]);
-        let (decoded_header, decoded_payload) = decode_frame(&encoded).expect("frame should decode");
+        let (decoded_header, decoded_payload) =
+            decode_frame(&encoded).expect("frame should decode");
 
         assert_eq!(header, decoded_header);
         assert!(decoded_payload.is_empty());
@@ -111,7 +126,8 @@ mod tests {
         let keyframe_encoded = encode_frame(&keyframe, b"a");
         let delta_encoded = encode_frame(&delta, b"b");
 
-        let (decoded_keyframe, _) = decode_frame(&keyframe_encoded).expect("keyframe should decode");
+        let (decoded_keyframe, _) =
+            decode_frame(&keyframe_encoded).expect("keyframe should decode");
         let (decoded_delta, _) = decode_frame(&delta_encoded).expect("delta should decode");
 
         assert_eq!(decoded_keyframe.frame_type, FRAME_KEYFRAME);
@@ -122,5 +138,30 @@ mod tests {
     fn decode_too_short_returns_none() {
         assert!(decode_frame(&[]).is_none());
         assert!(decode_frame(&[0; HEADER_SIZE - 1]).is_none());
+    }
+
+    #[test]
+    fn room_info_serializes_metrics() {
+        let info = RoomInfo {
+            id: "room-a".to_owned(),
+            width: 1920,
+            height: 1080,
+            watchers: 1,
+            active: true,
+            metrics: RoomMetrics {
+                packets_received: 10,
+                keyframes_received: 2,
+                bytes_received: 1024,
+                force_keyframe_requests: 1,
+                watcher_lag_events: 0,
+                watcher_lagged_frames: 0,
+                last_timestamp_ms: 123,
+                uptime_ms: 456,
+            },
+        };
+
+        let json = serde_json::to_string(&info).expect("room info should serialize");
+        assert!(json.contains("packets_received"));
+        assert!(json.contains("bytes_received"));
     }
 }

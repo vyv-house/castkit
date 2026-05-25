@@ -1,8 +1,8 @@
+use std::net::TcpStream;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     Arc,
 };
-use std::net::TcpStream;
 use std::time::{Duration, Instant};
 
 use clap::Parser;
@@ -71,7 +71,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let display = capture::Display::primary();
-    let cap_width = args.width.map(|w| w as usize).unwrap_or_else(|| display.width());
+    let cap_width = args
+        .width
+        .map(|w| w as usize)
+        .unwrap_or_else(|| display.width());
     let cap_height = args
         .height
         .map(|h| h as usize)
@@ -95,6 +98,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|error| format!("websocket connect failed: {error}"))?;
 
     let (frame_tx, frame_rx) = crossbeam_channel::bounded(2);
+    let dropped_capture_frames = Arc::new(AtomicU64::new(0));
     let config = capture::Config {
         cursor: true,
         letterbox: false,
@@ -102,6 +106,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         queue_length: 3,
     };
 
+    let capture_drops = dropped_capture_frames.clone();
     let capturer = capture::Capturer::new(
         display,
         cap_width,
@@ -112,12 +117,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             frame.surface_to_bgra(cap_height);
             let bgra = frame.to_vec();
             let stride = frame.stride();
-            let _ = frame_tx.try_send(FrameData {
-                bgra,
-                stride,
-                width: cap_width,
-                height: cap_height,
-            });
+            if frame_tx
+                .try_send(FrameData {
+                    bgra,
+                    stride,
+                    width: cap_width,
+                    height: cap_height,
+                })
+                .is_err()
+            {
+                capture_drops.fetch_add(1, Ordering::Relaxed);
+            }
         },
     )
     .map_err(|error| format!("failed to start capture: {error:?}"))?;
@@ -131,6 +141,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             force_kf_flag,
             cap_width,
             cap_height,
+            dropped_capture_frames,
         )
     });
 
@@ -154,12 +165,14 @@ fn run_capture_loop(
     force_kf_flag: Arc<AtomicBool>,
     cap_width: usize,
     cap_height: usize,
-) -> CaptureResult<()>
-{
+    dropped_capture_frames: Arc<AtomicU64>,
+) -> CaptureResult<()> {
     configure_read_timeout(&ws_stream)?;
     let start = Instant::now();
     let mut yuv_buf = Vec::new();
     let mut frame_count: u64 = 0;
+    let mut stats = ProducerStats::default();
+    let mut last_stats_at = Instant::now();
     loop {
         let frame_data = match frame_rx.recv_timeout(Duration::from_secs(5)) {
             Ok(frame) => frame,
@@ -170,11 +183,14 @@ fn run_capture_loop(
         poll_force_keyframe(&mut ws_stream, &force_kf_flag)?;
 
         let yuvfmt = encoder.yuvfmt.clone();
+        let convert_started = Instant::now();
         capture::convert_to_yuv(&frame_data, &yuvfmt, &mut yuv_buf)
             .map_err(|error| error.to_string())?;
+        stats.convert_ns += convert_started.elapsed().as_nanos() as u64;
 
         let pts = start.elapsed().as_millis() as i64;
         let force_kf = frame_count % 30 == 0 || force_kf_flag.swap(false, Ordering::Relaxed);
+        let encode_started = Instant::now();
         let packets = if force_kf {
             encoder
                 .force_keyframe(pts, &yuv_buf)
@@ -184,6 +200,7 @@ fn run_capture_loop(
                 .encode(pts, &yuv_buf)
                 .map_err(|error| error.to_string())?
         };
+        stats.encode_ns += encode_started.elapsed().as_nanos() as u64;
 
         for packet in &packets {
             let frame_type = if packet.is_keyframe {
@@ -198,15 +215,63 @@ fn run_capture_loop(
                 height: cap_height as u16,
             };
             let msg = shared::encode_frame(&header, &packet.data);
+            stats.bytes_sent += msg.len() as u64;
+            let send_started = Instant::now();
             ws_stream
                 .send(Message::Binary(msg))
                 .map_err(|error| error.to_string())?;
+            stats.send_ns += send_started.elapsed().as_nanos() as u64;
+            stats.packets_sent += 1;
+            if packet.is_keyframe {
+                stats.keyframes_sent += 1;
+            }
         }
 
         frame_count += 1;
+        stats.frames_captured += 1;
+
+        if last_stats_at.elapsed() >= Duration::from_secs(1) {
+            let elapsed = last_stats_at.elapsed().as_secs_f64();
+            let dropped = dropped_capture_frames.swap(0, Ordering::Relaxed);
+            stats.log(elapsed, dropped);
+            stats = ProducerStats::default();
+            last_stats_at = Instant::now();
+        }
     }
 
     Ok(())
+}
+
+#[derive(Default)]
+struct ProducerStats {
+    frames_captured: u64,
+    packets_sent: u64,
+    keyframes_sent: u64,
+    bytes_sent: u64,
+    convert_ns: u64,
+    encode_ns: u64,
+    send_ns: u64,
+}
+
+impl ProducerStats {
+    fn log(&self, elapsed_secs: f64, dropped_capture_frames: u64) {
+        let frames = self.frames_captured.max(1);
+        let pipeline_busy_pct = (self.convert_ns + self.encode_ns + self.send_ns) as f64
+            / (elapsed_secs * 1_000_000_000.0)
+            * 100.0;
+        tracing::info!(
+            fps = self.frames_captured as f64 / elapsed_secs,
+            pipeline_busy_pct,
+            packets_sent = self.packets_sent,
+            keyframes_sent = self.keyframes_sent,
+            dropped_capture_frames,
+            kbps = (self.bytes_sent as f64 * 8.0 / 1000.0) / elapsed_secs,
+            avg_convert_ms = self.convert_ns as f64 / frames as f64 / 1_000_000.0,
+            avg_encode_ms = self.encode_ns as f64 / frames as f64 / 1_000_000.0,
+            avg_send_ms = self.send_ns as f64 / self.packets_sent.max(1) as f64 / 1_000_000.0,
+            "producer telemetry"
+        );
+    }
 }
 
 fn poll_force_keyframe<S>(

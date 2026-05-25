@@ -53,9 +53,7 @@ export class StreamManager {
         worker.addEventListener('message', (event) => {
             const message = event.data;
 
-            if (message.type === 'fps') {
-                this.grid.setFps(roomId, message.value);
-            } else if (message.type === 'status') {
+            if (message.type === 'status') {
                 const status = message.connected
                     ? 'connected'
                     : message.reconnecting
@@ -64,6 +62,11 @@ export class StreamManager {
                 this.grid.setStatus(roomId, status);
             } else if (message.type === 'resolution') {
                 this.grid.setResolution(roomId, message.width, message.height);
+            } else if (message.type === 'metrics') {
+                if (Number.isFinite(message.fps)) {
+                    this.grid.setFps(roomId, message.fps);
+                }
+                this.grid.setMetrics(roomId, message);
             } else if (message.type === 'fatal') {
                 this.grid.setStatus(roomId, 'disconnected');
                 this.grid.setError(roomId, message.message || 'Unsupported browser');

@@ -109,6 +109,26 @@
     padding: 4px 8px; border-radius: 999px; background: rgba(46,204,113,0.15); color: var(--success); border: 1px solid rgba(46,204,113,0.25);
   }
   .room-meta { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .room-metrics {
+    margin-top: 14px;
+    padding-top: 12px;
+    border-top: 1px solid rgba(255,255,255,0.07);
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+  }
+  .metric-pill {
+    color: #c8d8ff;
+    background: rgba(255,255,255,0.06);
+    border: 1px solid rgba(255,255,255,0.07);
+    border-radius: 8px;
+    padding: 6px 8px;
+    font-size: 12px;
+    line-height: 1.25;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
   .meta-item { display: flex; align-items: center; gap: 8px; color: var(--text-muted); font-size: 13px; }
   .meta-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-muted); }
   .meta-dot.green { background: var(--success); box-shadow: 0 0 6px rgba(46,204,113,0.5); }
@@ -189,6 +209,15 @@ function renderCard(room) {
   const width = Number(room.width) || 0;
   const height = Number(room.height) || 0;
   const watchers = Number(room.watchers) || 0;
+  const metrics = room.metrics || {};
+  const packets = Number(metrics.packets_received) || 0;
+  const keyframes = Number(metrics.keyframes_received) || 0;
+  const bytes = Number(metrics.bytes_received) || 0;
+  const keyframeRequests = Number(metrics.force_keyframe_requests) || 0;
+  const lagEvents = Number(metrics.watcher_lag_events) || 0;
+  const laggedFrames = Number(metrics.watcher_lagged_frames) || 0;
+  const uptimeMs = Number(metrics.uptime_ms) || 0;
+  const packetsPerSecond = uptimeMs > 0 ? (packets / (uptimeMs / 1000)).toFixed(1) : '0.0';
   const active = room.active ? 'green' : 'red';
   const label = room.active ? 'Active' : 'Inactive';
   card.innerHTML = `
@@ -200,12 +229,38 @@ function renderCard(room) {
       <div class="meta-item"><span class="meta-dot ${active}"></span>${width}×${height}</div>
       <div class="meta-item"><span class="meta-dot ${active}"></span>${watchers} watcher${watchers === 1 ? '' : 's'}</div>
     </div>
+    <div class="room-metrics" aria-label="Room telemetry">
+      <div class="metric-pill">${packetsPerSecond} pkt/s avg</div>
+      <div class="metric-pill">${formatBytes(bytes)} received</div>
+      <div class="metric-pill">${packets} packets · ${keyframes} key</div>
+      <div class="metric-pill">${keyframeRequests} kf req</div>
+      <div class="metric-pill">${lagEvents} lag events</div>
+      <div class="metric-pill">${laggedFrames} lagged frames</div>
+    </div>
   `;
   return card;
 }
 
 function escapeHtml(str) {
-  return String(str).replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;','\'':'&#39;'}[c]));
+  return String(str).replace(/[&<>"']/g, (c) => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;',
+  }[c]));
+}
+
+function formatBytes(bytes) {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
+  const units = ['B', 'KiB', 'MiB', 'GiB'];
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return `${value >= 10 ? value.toFixed(0) : value.toFixed(1)} ${units[unit]}`;
 }
 
 async function load() {
