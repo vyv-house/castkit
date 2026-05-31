@@ -1,0 +1,15 @@
+[package]
+name = "cli"
+version = "0.1.0"
+edition.workspace = true
+
+[[bin]]
+name = "castkit"
+path = "src/main.rs"
+
+[dependencies]
+gateway = { path = "../gateway" }
+producer = { path = "../producer" }
+tokio = { workspace = true }
+clap = { workspace = true }
+tracing-subscriber = { workspace = true }
