@@ -1,4 +1,7 @@
-use std::{env, fs, path::{Path, PathBuf}};
+use std::{
+    env, fs,
+    path::{Path, PathBuf},
+};
 
 fn static_lib_name(package: &str) -> &str {
     package.strip_prefix("lib").unwrap_or(package)
@@ -26,7 +29,10 @@ fn link_vcpkg(vcpkg_root: PathBuf, package: &str) -> PathBuf {
     let package_root = installed_root.join(vcpkg_triplet());
 
     println!("cargo:rustc-link-lib=static={}", static_lib_name(package));
-    println!("cargo:rustc-link-search={}", package_root.join("lib").display());
+    println!(
+        "cargo:rustc-link-search={}",
+        package_root.join("lib").display()
+    );
 
     package_root.join("include")
 }
@@ -48,11 +54,17 @@ fn link_homebrew_m1(package: &str) -> PathBuf {
     versions.sort_unstable();
 
     let package_root = versions.pop().unwrap_or_else(|| {
-        panic!("no installed versions of {package} found in {}", cellar.display())
+        panic!(
+            "no installed versions of {package} found in {}",
+            cellar.display()
+        )
     });
 
     println!("cargo:rustc-link-lib=static={}", static_lib_name(package));
-    println!("cargo:rustc-link-search={}", package_root.join("lib").display());
+    println!(
+        "cargo:rustc-link-search={}",
+        package_root.join("lib").display()
+    );
 
     package_root.join("include")
 }
@@ -71,8 +83,8 @@ fn link_nix(package: &str) -> Option<PathBuf> {
     }
 
     let short_name = static_lib_name(package);
-    if let Ok(lib) = pkg_config::probe_library(short_name)
-        .or_else(|_| pkg_config::probe_library(package))
+    if let Ok(lib) =
+        pkg_config::probe_library(short_name).or_else(|_| pkg_config::probe_library(package))
     {
         return Some(lib.include_paths.into_iter().next().unwrap_or_default());
     }
@@ -113,7 +125,12 @@ fn generate_bindings(header: &Path, include_paths: &[PathBuf], output: &Path, re
 
     builder
         .generate()
-        .unwrap_or_else(|err| panic!("failed to generate bindings for {}: {err}", header.display()))
+        .unwrap_or_else(|err| {
+            panic!(
+                "failed to generate bindings for {}: {err}",
+                header.display()
+            )
+        })
         .write_to_file(output)
         .unwrap_or_else(|err| panic!("failed to write bindings to {}: {err}", output.display()));
 }
